@@ -125,3 +125,279 @@
 .cc-hidden {
 	display: none !important;
 }
+
+/* ==========================================================================
+   Query Timeline / Minimap & Navigation Popup
+   ========================================================================== */
+
+.cc-query-nav {
+	position: fixed;
+	right: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	z-index: 9995;
+	display: flex;
+	flex-direction: row-reverse;
+	align-items: center;
+	gap: 10px;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	user-select: none;
+}
+
+/* Vertical Timeline Track (Image 1) */
+.cc-query-timeline {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	padding: 10px 4px;
+	background: rgba(22, 22, 22, 0.88);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 20px;
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+	cursor: pointer;
+	touch-action: manipulation;
+	-webkit-tap-highlight-color: transparent;
+	transition: all 200ms ease;
+}
+
+[data-mode="light"] .cc-query-timeline {
+	background: rgba(245, 245, 243, 0.92);
+	border-color: rgba(0, 0, 0, 0.08);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+.cc-query-timeline:hover {
+	background: rgba(28, 28, 28, 0.96);
+	border-color: rgba(255, 255, 255, 0.14);
+}
+
+[data-mode="light"] .cc-query-timeline:hover {
+	background: rgba(255, 255, 255, 0.98);
+	border-color: rgba(0, 0, 0, 0.14);
+}
+
+/* Dot Wrapper for generous tap/click hit area */
+.cc-query-dot-wrapper {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 22px;
+	cursor: pointer;
+	border-radius: 6px;
+	touch-action: manipulation;
+	-webkit-tap-highlight-color: transparent;
+	transition: background-color 150ms ease;
+}
+
+.cc-query-dot-wrapper:hover,
+.cc-query-dot-wrapper:active {
+	background-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-mode="light"] .cc-query-dot-wrapper:hover,
+[data-mode="light"] .cc-query-dot-wrapper:active {
+	background-color: rgba(0, 0, 0, 0.06);
+}
+
+/* Timeline Dash Markers */
+.cc-query-dot {
+	width: 14px;
+	height: 3px;
+	border-radius: 2px;
+	background: #555553;
+	pointer-events: none;
+	transition: all 180ms ease;
+}
+
+[data-mode="light"] .cc-query-dot {
+	background: #bfbfbc;
+}
+
+.cc-query-dot-wrapper:hover .cc-query-dot {
+	background: #8e8e8a;
+	transform: scaleX(1.15);
+}
+
+.cc-query-dot.cc-active {
+	width: 16px;
+	height: 4px;
+	border-radius: 2px;
+	background: #da7756;
+	box-shadow: 0 0 8px rgba(218, 119, 86, 0.5);
+}
+
+[data-mode="light"] .cc-query-dot.cc-active {
+	background: #c86545;
+	box-shadow: 0 0 8px rgba(200, 101, 69, 0.4);
+}
+
+/* Expanded Navigation Popup Card (Image 2) */
+.cc-query-popup {
+	width: 290px;
+	max-width: calc(100vw - 80px);
+	max-height: 75vh;
+	overflow-y: auto;
+	overflow-x: hidden;
+	background: #1f1f1e;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 14px;
+	padding: 8px 6px;
+	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	opacity: 0;
+	transform: scale(0.95) translateX(8px);
+	pointer-events: none;
+	transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1), transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-mode="light"] .cc-query-popup {
+	background: #ffffff;
+	border-color: rgba(0, 0, 0, 0.1);
+	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.15), 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.cc-query-popup.cc-open {
+	opacity: 1;
+	transform: scale(1) translateX(0);
+	pointer-events: auto;
+}
+
+/* Custom Scrollbar for Popup */
+.cc-query-popup::-webkit-scrollbar {
+	width: 4px;
+}
+.cc-query-popup::-webkit-scrollbar-track {
+	background: transparent;
+}
+.cc-query-popup::-webkit-scrollbar-thumb {
+	background: rgba(255, 255, 255, 0.15);
+	border-radius: 2px;
+}
+[data-mode="light"] .cc-query-popup::-webkit-scrollbar-thumb {
+	background: rgba(0, 0, 0, 0.15);
+}
+
+/* Query Row Item */
+.cc-query-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 12px;
+	border-radius: 8px;
+	cursor: pointer;
+	text-decoration: none;
+	touch-action: manipulation;
+	-webkit-tap-highlight-color: transparent;
+	transition: background-color 120ms ease, color 120ms ease;
+	gap: 12px;
+	min-height: 36px;
+	box-sizing: border-box;
+}
+
+.cc-query-item:hover,
+.cc-query-item:active {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+[data-mode="light"] .cc-query-item:hover,
+[data-mode="light"] .cc-query-item:active {
+	background: rgba(0, 0, 0, 0.05);
+}
+
+.cc-query-item.cc-active {
+	background: rgba(218, 119, 86, 0.12);
+}
+
+[data-mode="light"] .cc-query-item.cc-active {
+	background: rgba(200, 101, 69, 0.08);
+}
+
+/* Query Item Text */
+.cc-query-text {
+	font-size: 13px;
+	line-height: 1.35;
+	color: #9e9e9c;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	flex: 1;
+	text-align: left;
+	transition: color 120ms ease;
+}
+
+[data-mode="light"] .cc-query-text {
+	color: #6b6b69;
+}
+
+.cc-query-item:hover .cc-query-text {
+	color: #ffffff;
+	font-weight: 500;
+}
+
+[data-mode="light"] .cc-query-item:hover .cc-query-text {
+	color: #141413;
+	font-weight: 500;
+}
+
+.cc-query-item.cc-active .cc-query-text {
+	color: #da7756;
+	font-weight: 500;
+}
+
+[data-mode="light"] .cc-query-item.cc-active .cc-query-text {
+	color: #c86545;
+	font-weight: 500;
+}
+
+/* Query Item Dash Marker (on the right of row) */
+.cc-query-item-dot {
+	width: 14px;
+	height: 3px;
+	border-radius: 2px;
+	background: #555553;
+	flex-shrink: 0;
+	transition: all 120ms ease;
+}
+
+[data-mode="light"] .cc-query-item-dot {
+	background: #bfbfbc;
+}
+
+.cc-query-item.cc-active .cc-query-item-dot {
+	width: 16px;
+	height: 4px;
+	background: #da7756;
+	border-radius: 2px;
+}
+
+[data-mode="light"] .cc-query-item.cc-active .cc-query-item-dot {
+	background: #c86545;
+}
+
+/* Pulse / Flash Animation for Chat Message Target */
+@keyframes cc-target-flash {
+	0% {
+		box-shadow: 0 0 0 0 rgba(218, 119, 86, 0.7);
+		background-color: rgba(218, 119, 86, 0.18);
+	}
+	50% {
+		box-shadow: 0 0 0 6px rgba(218, 119, 86, 0.25);
+		background-color: rgba(218, 119, 86, 0.28);
+	}
+	100% {
+		box-shadow: 0 0 0 0 rgba(218, 119, 86, 0);
+		background-color: transparent;
+	}
+}
+
+.cc-query-target-highlight {
+	animation: cc-target-flash 1.8s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+	border-radius: 8px !important;
+	transition: all 300ms ease !important;
+}

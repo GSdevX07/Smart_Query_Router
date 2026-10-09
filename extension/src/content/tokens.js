@@ -206,5 +206,40 @@
 		};
 	}
 
-	CC.tokens = { computeConversationMetrics };
+	function extractTrunkQueries(conversation) {
+		const trunk = buildTrunk(conversation);
+		const queries = [];
+		let index = 0;
+		for (const msg of trunk) {
+			if (msg?.sender === 'human' || msg?.sender === 'user') {
+				let text = '';
+				if (typeof msg.text === 'string' && msg.text) {
+					text = msg.text;
+				} else if (Array.isArray(msg.content)) {
+					const parts = [];
+					for (const item of msg.content) {
+						if (item?.type === 'text' && typeof item.text === 'string') {
+							parts.push(item.text);
+						}
+					}
+					text = parts.join(' ');
+				}
+				text = text.trim();
+				if (text) {
+					queries.push({
+						id: msg.uuid || `q_${index}`,
+						uuid: msg.uuid || null,
+						text,
+						index,
+						createdAt: msg.created_at || null
+					});
+					index++;
+				}
+			}
+		}
+		return queries;
+	}
+
+	CC.tokens = { computeConversationMetrics, extractTrunkQueries, buildTrunk };
 })();
+

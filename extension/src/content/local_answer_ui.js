@@ -26,6 +26,215 @@
   const ROOT_ID = 'smart-query-router-local-answer-root';
   const DEFAULT_AUTO_DISMISS_MS = 30000;
 
+  function escapeHtml(str) {
+    if (typeof str !== 'string') return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function applyInlineFormatting(text) {
+    if (!text) return '';
+    return text
+      // Bold + Italic: ***text***
+      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      // Bold: **text**
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      // Italic: *text*
+      .replace(/(^|[^\*])\*([^\*\s][^\*]*?[^\*\s]|[^\*\s])\*(?!\*)/g, '$1<em>$2</em>')
+      // Italic: _text_
+      .replace(/(^|[^_])_([^_]+)_(?!_)/g, '$1<em>$2</em>');
+  }
+
+  /**
+   * Transforms markdown text into safe, richly formatted HTML styled like Claude's native chat.
+   * Eliminates raw markdown syntax (##, **, *, ---) and replaces them with styled elements.
+   * @param {string} rawMarkdown
+   * @returns {string}
+   */
+  function renderMarkdownToHtml(rawMarkdown) {
+    if (!rawMarkdown || typeof rawMarkdown !== 'string') return '';
+
+    const codeBlocks = [];
+    const inlineCodes = [];
+
+    // 1. Extract fenced code blocks (```lang\ncode\n``` or ```code```)
+    let text = rawMarkdown.replace(/```([a-zA-Z0-9_-]*)\r?\n?([\s\S]*?)```/g, (match, lang, code) => {
+      const placeholder = `__SQR_CODEBLOCK_${codeBlocks.length}__`;
+      const escapedCode = escapeHtml(code.replace(/\r?\n$/, ''));
+      const safeLang = escapeHtml(lang.trim());
+      const headerHtml = safeLang
+        ? `<div class="sqr-md-code-header"><span class="sqr-md-code-lang">${safeLang}</span></div>`
+        : '';
+      codeBlocks.push(
+        `<div class="sqr-md-code-wrap">${headerHtml}<pre class="sqr-md-pre"><code class="sqr-md-code">${escapedCode}</code></pre></div>`
+      );
+      return placeholder;
+    });
+
+    // 2. Extract inline code (`code`)
+    text = text.replace(/`([^`\r\n]+)`/g, (match, code) => {
+      const placeholder = `__SQR_INLINE_${inlineCodes.length}__`;
+      inlineCodes.push(`<code class="sqr-md-inline-code">${escapeHtml(code)}</code>`);
+      return placeholder;
+    });
+
+    // 3. Escape all remaining raw HTML entities in regular text
+    text = escapeHtml(text);
+
+    // 4. Parse block structures line-by-line
+    const rawLines = text.split(/\r?\n/);
+    const outputBlocks = [];
+    let currentList = null; // { type: 'ul' | 'ol', items: [] }
+    let currentParagraph = [];
+
+    function flushParagraph() {
+      if (currentParagraph.length > 0) {
+        const content = currentParagraph.join('<br>');
+        if (content.trim()) {
+          outputBlocks.push(`<p class="sqr-md-p">${applyInlineFormatting(content)}</p>`);
+        }
+        currentParagraph = [];
+      }
+    }
+
+    function flushList() {
+      if (currentList) {
+        if (currentList.type === 'ul') {
+          const itemsHtml = currentList.items
+            .map((item) => `<li class="sqr-md-li">${applyInlineFormatting(item)}</li>`)
+            .join('');
+          outputBlocks.push(`<ul class="sqr-md-ul">${itemsHtml}</ul>`);
+        } else if (currentList.type === 'ol') {
+          const itemsHtml = currentList.items
+            .map((item) => `<li class="sqr-md-oli">${applyInlineFormatting(item)}</li>`)
+            .join('');
+          outputBlocks.push(`<ol class="sqr-md-ol">${itemsHtml}</ol>`);
+        }
+        currentList = null;
+      }
+    }
+
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i];
+      const trimmed = line.trim();
+
+      // Check for code block placeholder lines
+      const codeBlockMatch = trimmed.match(/^(__SQR_CODEBLOCK_\d+__)$/);
+      if (codeBlockMatch) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push(codeBlockMatch[1]);
+        continue;
+      }
+
+      // Empty line
+      if (!trimmed) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      // Horizontal Rule (--- or *** or ___)
+      if (/^(?:---+|\*\*\*+|___+)\s*$/.test(trimmed)) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push('<hr class="sqr-md-hr">');
+        continue;
+      }
+
+      // Headings: #, ##, ###, ####
+      const h1Match = trimmed.match(/^#\s+(.+)$/);
+      if (h1Match) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push(`<h2 class="sqr-md-h2">${applyInlineFormatting(h1Match[1])}</h2>`);
+        continue;
+      }
+
+      const h2Match = trimmed.match(/^##\s+(.+)$/);
+      if (h2Match) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push(`<h3 class="sqr-md-h3">${applyInlineFormatting(h2Match[1])}</h3>`);
+        continue;
+      }
+
+      const h3Match = trimmed.match(/^###\s+(.+)$/);
+      if (h3Match) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push(`<h4 class="sqr-md-h4">${applyInlineFormatting(h3Match[1])}</h4>`);
+        continue;
+      }
+
+      const h4Match = trimmed.match(/^####\s+(.+)$/);
+      if (h4Match) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push(`<h5 class="sqr-md-h5">${applyInlineFormatting(h4Match[1])}</h5>`);
+        continue;
+      }
+
+      // Blockquote: > text or &gt; text
+      const bqMatch = trimmed.match(/^(?:&gt;|>)\s*(.+)$/);
+      if (bqMatch) {
+        flushParagraph();
+        flushList();
+        outputBlocks.push(`<blockquote class="sqr-md-blockquote">${applyInlineFormatting(bqMatch[1])}</blockquote>`);
+        continue;
+      }
+
+      // Bullet List: - item or * item
+      const ulMatch = trimmed.match(/^(?:-|\*|\+)\s+(.+)$/);
+      if (ulMatch) {
+        flushParagraph();
+        if (!currentList || currentList.type !== 'ul') {
+          flushList();
+          currentList = { type: 'ul', items: [] };
+        }
+        currentList.items.push(ulMatch[1]);
+        continue;
+      }
+
+      // Numbered List: 1. item
+      const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+      if (olMatch) {
+        flushParagraph();
+        if (!currentList || currentList.type !== 'ol') {
+          flushList();
+          currentList = { type: 'ol', items: [] };
+        }
+        currentList.items.push(olMatch[1]);
+        continue;
+      }
+
+      // Regular line -> accumulate in current paragraph
+      flushList();
+      currentParagraph.push(line);
+    }
+
+    flushParagraph();
+    flushList();
+
+    let html = outputBlocks.join('');
+
+    // 5. Restore inline code placeholders
+    inlineCodes.forEach((codeHtml, idx) => {
+      html = html.split(`__SQR_INLINE_${idx}__`).join(codeHtml);
+    });
+
+    // 6. Restore code block placeholders
+    codeBlocks.forEach((blockHtml, idx) => {
+      html = html.split(`__SQR_CODEBLOCK_${idx}__`).join(blockHtml);
+    });
+
+    return html;
+  }
+
   class LocalAnswerUiController {
     /**
      * @param {object} [options]
@@ -88,13 +297,16 @@
     }
 
     /**
-     * Displays on-device local answer card
+     * Displays on-device local answer card or extension cache hit card
      * 
      * @param {object} params
-     * @param {string} params.expression - Evaluated expression (e.g. "5 + 2")
-     * @param {string|number} params.result - Computed result (e.g. 7)
-     * @param {string} [params.ruleId] - Identifying rule (e.g. "RULE_LOCAL_DETERMINISTIC_ARITHMETIC")
+     * @param {string} params.expression - Evaluated expression or query
+     * @param {string|number} params.result - Computed result or cached answer
+     * @param {string} [params.ruleId] - Identifying rule or cache identifier
      * @param {string} [params.rawQuery] - Original query string
+     * @param {boolean} [params.isCache] - Whether this is an extension cache hit
+     * @param {number} [params.tokensSaved] - Estimated tokens saved by cache hit
+     * @param {number} [params.hitCount] - Cumulative hit count for cached query
      * @param {Function} [params.onAskClaudeAnyway] - Callback to submit natively to Claude
      * @param {HTMLElement} [params.editorElement] - Prompt editor element for contextual positioning
      */
@@ -104,6 +316,9 @@
       ruleId = 'LOCAL_RULE',
       rawQuery = '',
       isMath = null,
+      isCache = false,
+      tokensSaved = 0,
+      hitCount = 1,
       onAskClaudeAnyway = null,
       editorElement = null
     } = {}) {
@@ -118,6 +333,9 @@
         ruleId,
         rawQuery: String(rawQuery || expression),
         isMath,
+        isCache: Boolean(isCache || ruleId.includes('CACHE')),
+        tokensSaved: Number(tokensSaved) || 0,
+        hitCount: Number(hitCount) || 1,
         onAskClaudeAnyway,
         editorElement
       };
@@ -160,7 +378,9 @@
         const viewportWidth = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : 1200;
         const viewportHeight = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 800;
 
-        const cardWidth = Math.min(400, Math.max(300, viewportWidth - 32));
+        const isCache = Boolean(this.currentData && this.currentData.isCache);
+        const targetWidth = isCache ? 540 : 400;
+        const cardWidth = Math.min(targetWidth, Math.max(320, viewportWidth - 32));
 
         // Center card horizontally relative to the editor element's center
         const editorCenterX = rect.left + rect.width / 2;
@@ -193,9 +413,18 @@
       const root = this._ensureRoot();
       if (!root || !this.currentData) return;
 
-      const { expression, result, isMath, ruleId } = this.currentData;
-      const isSimpleMath = isMath === true ||
-        (isMath === null && (ruleId === 'RULE_LOCAL_DETERMINISTIC_ARITHMETIC' || /^[0-9\.\s\+\-\*\/\%\^\(\)\=]+$/.test(expression)));
+      const { expression, result, isMath, ruleId, isCache, tokensSaved, hitCount } = this.currentData;
+      const isSimpleMath = !isCache && (isMath === true ||
+        (isMath === null && (ruleId === 'RULE_LOCAL_DETERMINISTIC_ARITHMETIC' || /^[0-9\.\s\+\-\*\/\%\^\(\)\=]+$/.test(expression))));
+
+      let badgeHtml = '⚡ Solved on-device · 0ms · $0';
+      if (isCache) {
+        const hitSuffix = hitCount > 1 ? ` (x${hitCount})` : '';
+        const savedSuffix = tokensSaved > 0 ? ` · Saved ${tokensSaved} tokens` : '';
+        badgeHtml = `⚡ Extension Cache Hit${hitSuffix}${savedSuffix} · 0ms · $0`;
+      }
+
+      const formattedAnswerHtml = isCache ? renderMarkdownToHtml(result) : escapeHtml(result);
 
       root.innerHTML = `
         <style>
@@ -214,8 +443,11 @@
             bottom: 90px;
             left: 50%;
             transform: translateX(-50%);
-            width: 380px;
+            width: ${isCache ? '540px' : '400px'};
             max-width: calc(100vw - 32px);
+            max-height: calc(100vh - 120px);
+            display: flex;
+            flex-direction: column;
             padding: 14px 16px;
             background: rgba(18, 18, 22, 0.96);
             backdrop-filter: blur(20px);
@@ -237,6 +469,7 @@
             align-items: center;
             justify-content: space-between;
             margin-bottom: 8px;
+            flex-shrink: 0;
           }
           .sqr-local-badge {
             display: inline-flex;
@@ -250,6 +483,11 @@
             border-radius: 9999px;
             border: 1px solid rgba(255, 255, 255, 0.12);
             letter-spacing: 0.02em;
+          }
+          .sqr-local-badge-cache {
+            background: rgba(218, 119, 86, 0.15);
+            border-color: rgba(218, 119, 86, 0.35);
+            color: #ff9d79;
           }
           .sqr-local-close {
             background: none;
@@ -267,9 +505,203 @@
           }
           .sqr-local-content {
             display: flex;
-            align-items: center;
+            align-items: stretch;
             padding: 8px 0 12px 0;
             border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            overflow: hidden;
+            flex: 1;
+          }
+          .sqr-local-cache-view {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            width: 100%;
+            overflow: hidden;
+          }
+          .sqr-local-cache-query {
+            font-size: 12px;
+            color: #d4d4d8;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+            padding: 8px 10px;
+            max-height: 90px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.45;
+            flex-shrink: 0;
+          }
+          .sqr-local-cache-answer {
+            font-size: 13px;
+            font-weight: 400;
+            color: #f4f4f5;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+            padding: 10px 12px;
+            max-height: 330px;
+            overflow-y: auto;
+            white-space: normal;
+            word-break: break-word;
+            line-height: 1.55;
+            flex: 1;
+          }
+          .sqr-local-cache-query::-webkit-scrollbar,
+          .sqr-local-cache-answer::-webkit-scrollbar {
+            width: 5px;
+          }
+          .sqr-local-cache-query::-webkit-scrollbar-thumb,
+          .sqr-local-cache-answer::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 3px;
+          }
+          /* Claude-Style Rich Markdown Formatting */
+          .sqr-md-h2 {
+            font-size: 15.5px;
+            font-weight: 600;
+            color: #ffffff;
+            margin: 12px 0 6px 0;
+            line-height: 1.35;
+          }
+          .sqr-md-h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #ffffff;
+            margin: 10px 0 5px 0;
+            line-height: 1.35;
+          }
+          .sqr-md-h4, .sqr-md-h5 {
+            font-size: 13px;
+            font-weight: 600;
+            color: #f4f4f5;
+            margin: 8px 0 4px 0;
+            line-height: 1.35;
+          }
+          .sqr-md-h2:first-child,
+          .sqr-md-h3:first-child,
+          .sqr-md-h4:first-child {
+            margin-top: 0;
+          }
+          .sqr-md-p {
+            font-size: 13px;
+            line-height: 1.55;
+            color: #e4e4e7;
+            margin: 0 0 8px 0;
+          }
+          .sqr-md-p:last-child {
+            margin-bottom: 0;
+          }
+          .sqr-md-p strong,
+          .sqr-md-li strong,
+          .sqr-md-oli strong {
+            font-weight: 600;
+            color: #ffffff;
+          }
+          .sqr-md-ul {
+            margin: 6px 0 10px 0;
+            padding-left: 18px;
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+          }
+          .sqr-md-li {
+            position: relative;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #e4e4e7;
+            padding-left: 2px;
+          }
+          .sqr-md-li::before {
+            content: "";
+            position: absolute;
+            left: -14px;
+            top: 7px;
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background-color: #da7756;
+          }
+          .sqr-md-ol {
+            margin: 6px 0 10px 0;
+            padding-left: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            list-style-type: decimal;
+          }
+          .sqr-md-oli {
+            font-size: 13px;
+            line-height: 1.5;
+            color: #e4e4e7;
+          }
+          .sqr-md-hr {
+            border: 0;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.12);
+            margin: 12px 0;
+          }
+          .sqr-md-blockquote {
+            margin: 8px 0;
+            padding: 6px 12px;
+            border-left: 3px solid #da7756;
+            background: rgba(218, 119, 86, 0.08);
+            border-radius: 0 6px 6px 0;
+            color: #e4e4e7;
+            font-style: italic;
+            font-size: 12.5px;
+            line-height: 1.5;
+          }
+          .sqr-md-inline-code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 11.5px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            padding: 1px 5px;
+            border-radius: 4px;
+            color: #ff9d79;
+          }
+          .sqr-md-code-wrap {
+            margin: 8px 0;
+            border-radius: 6px;
+            background: #0d0d11;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+          }
+          .sqr-md-code-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 4px 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 10.5px;
+            color: #a1a1aa;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            text-transform: lowercase;
+          }
+          .sqr-md-code-lang {
+            color: #da7756;
+            font-weight: 500;
+          }
+          .sqr-md-pre {
+            margin: 0;
+            padding: 10px 12px;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.45;
+            color: #f4f4f5;
+          }
+          .sqr-md-code {
+            font-family: inherit;
+            font-size: inherit;
+            background: transparent;
+            padding: 0;
+            border: none;
+            white-space: pre;
           }
           .sqr-local-calc {
             display: flex;
@@ -329,6 +761,7 @@
             align-items: center;
             gap: 6px;
             margin-top: 10px;
+            flex-shrink: 0;
           }
           .sqr-action-btn {
             flex: 1;
@@ -377,15 +810,22 @@
         </style>
         <div class="sqr-local-card" role="dialog" aria-label="Smart Query Router Local Answer">
           <div class="sqr-local-header">
-            <span class="sqr-local-badge">⚡ Solved on-device · 0ms · $0</span>
+            <span class="sqr-local-badge ${isCache ? 'sqr-local-badge-cache' : ''}">${badgeHtml}</span>
             <button class="sqr-local-close" id="sqr-local-btn-close" title="Dismiss (Escape)" aria-label="Close">✕</button>
           </div>
           <div class="sqr-local-content">
-            <div class="sqr-local-calc ${isSimpleMath ? 'is-math' : 'is-text'}">
-              <span class="sqr-local-expr" title="${expression}">${expression}</span>
-              ${isSimpleMath ? '<span class="sqr-local-equals">=</span>' : '<span class="sqr-local-equals" style="display:none">=</span>'}
-              <span class="sqr-local-result ${isSimpleMath ? '' : 'sqr-local-result-text'}" id="sqr-local-result-val">${result}</span>
-            </div>
+            ${isCache ? `
+              <div class="sqr-local-cache-view">
+                <div class="sqr-local-cache-query" title="${escapeHtml(expression)}"><strong style="color:#ff9d79;">Prompt:</strong> ${escapeHtml(expression)}</div>
+                <div class="sqr-local-cache-answer" id="sqr-local-result-val">${formattedAnswerHtml}</div>
+              </div>
+            ` : `
+              <div class="sqr-local-calc ${isSimpleMath ? 'is-math' : 'is-text'}">
+                <span class="sqr-local-expr" title="${escapeHtml(expression)}">${escapeHtml(expression)}</span>
+                ${isSimpleMath ? '<span class="sqr-local-equals">=</span>' : '<span class="sqr-local-equals" style="display:none">=</span>'}
+                <span class="sqr-local-result ${isSimpleMath ? '' : 'sqr-local-result-text'}" id="sqr-local-result-val">${formattedAnswerHtml}</span>
+              </div>
+            `}
           </div>
           <div class="sqr-local-actions">
             <button class="sqr-action-btn sqr-action-btn-primary" id="sqr-local-btn-copy">Copy</button>
@@ -506,6 +946,9 @@
   return {
     ROOT_ID,
     DEFAULT_AUTO_DISMISS_MS,
-    LocalAnswerUiController
+    LocalAnswerUiController,
+    escapeHtml,
+    renderMarkdownToHtml,
+    applyInlineFormatting
   };
 });

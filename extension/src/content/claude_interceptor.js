@@ -80,6 +80,9 @@
   const statusSurfaceModule = globalThis.SmartQueryRouterStatusSurface || null;
   const statusSurfaceController = statusSurfaceModule ? statusSurfaceModule.defaultStatusSurface : null;
 
+  const queryCacheModule = globalThis.SmartQueryRouterQueryCache || null;
+  const queryCache = queryCacheModule ? queryCacheModule.defaultQueryCache : null;
+
   const responseTrackerModule = globalThis.SmartQueryRouterResponseTracker || null;
   const {
     ResponseLifecycleState,
@@ -203,11 +206,26 @@
               if (metricsTracker) {
                 const promptText = (latestTransientQueryEvent && latestTransientQueryEvent.content)
                   ? latestTransientQueryEvent.content.rawText
-                  : '';
+                  : (turnTracker && turnTracker.getRecentTurns().length > 0
+                      ? (turnTracker.getRecentTurns().filter(t => t.role === 'user').slice(-1)[0] || {}).text
+                      : '');
                 const responseText = (meta && meta.rawResponseText) || '';
                 const consumed = tokenCounterModule
                   ? tokenCounterModule.estimateConsumedTokens(promptText, responseText, turnTracker)
                   : { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+
+                // Store query-response pair in extension local cache for future identical queries
+                if (queryCache && promptText && responseText && (!latestTransientQueryEvent || !latestTransientQueryEvent._localAnswerResolved)) {
+                  queryCache.set(promptText, responseText, {
+                    conversationId: (latestTransientQueryEvent && latestTransientQueryEvent.context) ? latestTransientQueryEvent.context.conversationId : null
+                  });
+                  if (logger) {
+                    logger.info(EventCategory.QUERY_DETECTION, 'Saved completed Claude response to extension local cache', {
+                      promptLength: promptText.length,
+                      responseLength: responseText.length
+                    });
+                  }
+                }
 
                 if (latestTransientQueryEvent && latestTransientQueryEvent._recordedActivity) {
                   latestTransientQueryEvent._recordedActivity.tokensConsumed = consumed.totalTokens;
@@ -383,8 +401,6 @@
     return text
       .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060\u180E]/g, '')
       .replace(/\u00A0/g, ' ')
-      .replace(/[\r\n\t]+/g, ' ')
-      .replace(/\s+/g, ' ')
       .trim();
   }
 
@@ -414,16 +430,25 @@
 
   function extractEditorText(editor) {
     if (!editor) return '';
+    // Use innerText as primary source since ProseMirror renders paragraphs, blockquotes,
+    // list items, and code blocks that innerText natively preserves with proper spacing and newlines.
     let text = '';
-    const pElements = editor.querySelectorAll ? editor.querySelectorAll('p') : null;
-    if (pElements && pElements.length > 0) {
-      const lines = [];
-      pElements.forEach((p) => {
-        lines.push(p.innerText || p.textContent || '');
-      });
-      text = lines.join(' ');
+    if (typeof editor.innerText === 'string' && editor.innerText.trim().length > 0) {
+      text = editor.innerText;
+    } else if (editor.querySelectorAll) {
+      const blockElements = editor.querySelectorAll('p, div, pre, li, blockquote');
+      if (blockElements.length > 0) {
+        const lines = [];
+        blockElements.forEach((el) => {
+          const t = (el.innerText || el.textContent || '').trim();
+          if (t) lines.push(t);
+        });
+        text = lines.join('\n');
+      } else {
+        text = editor.textContent || '';
+      }
     } else {
-      text = editor.innerText || editor.textContent || '';
+      text = editor.textContent || '';
     }
     return sanitizeQueryString(text);
   }
@@ -1524,6 +1549,86 @@
       }
     }
 
+    // Check for on-device extension query cache match (serves repeated queries directly from cache)
+    const isCachingActive = userSettingsManager && typeof userSettingsManager.isOptimizationCategoryEnabled === 'function'
+      ? userSettingsManager.isOptimizationCategoryEnabled('caching')
+      : (typeof userSettingsManager.isOptimizationEnabled !== 'function' || userSettingsManager.isOptimizationEnabled());
+
+    if (isCachingActive && !isBypass && queryCache && localAnswerController && queryCache.has(text)) {
+      const cachedEntry = queryCache.get(text, { turnTracker });
+      if (cachedEntry) {
+        event._sqrHandled = true;
+        if (typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+
+        const promptToks = tokenCounterModule
+          ? tokenCounterModule.countTokens(text) + (tokenCounterModule.MESSAGE_FRAMING_OVERHEAD_TOKENS || 3)
+          : Math.ceil(text.length / 4) + 3;
+        const responseToks = tokenCounterModule
+          ? tokenCounterModule.countTokens(cachedEntry.responseText) + (tokenCounterModule.MESSAGE_FRAMING_OVERHEAD_TOKENS || 3)
+          : Math.ceil(cachedEntry.responseText.length / 4) + 3;
+        const contextToks = (turnTracker && tokenCounterModule && typeof tokenCounterModule.countConversationTokens === 'function')
+          ? tokenCounterModule.countConversationTokens(turnTracker.getRecentTurns())
+          : 0;
+        const totalTokensSaved = cachedEntry.hitTokensSaved || (promptToks + responseToks + contextToks);
+
+        localAnswerController.showAnswer({
+          expression: text,
+          result: cachedEntry.responseText,
+          ruleId: 'RULE_EXTENSION_QUERY_CACHE_HIT',
+          rawQuery: text,
+          isCache: true,
+          tokensSaved: totalTokensSaved,
+          hitCount: cachedEntry.hitCount,
+          editorElement: editor,
+          onAskClaudeAnyway: () => {
+            triggerNativeSubmission(editor, text);
+          }
+        });
+
+        if (metricsTracker) {
+          const diag = buildRouteDiagnostics({
+            routeType: 'LOCAL',
+            cacheOutcome: 'HIT',
+            routing: {
+              reasonCode: 'CACHE_HIT',
+              explanation: 'Identical query detected. Served instantly from extension local cache, saving 100% of LLM tokens.'
+            }
+          });
+
+          metricsTracker.recordActivity({
+            route: 'Extension Query Cache',
+            modelTier: 'local',
+            cacheOutcome: 'HIT',
+            tokensSaved: totalTokensSaved,
+            tokensConsumed: 0,
+            latencyMs: 0.1,
+            status: 'CACHE_HIT',
+            diagnostics: diag
+          });
+        }
+
+        latestTransientQueryEvent = { _localAnswerResolved: true, _cacheHit: true };
+
+        if (logger) {
+          logger.info(EventCategory.QUERY_DETECTION, 'Query served from extension local cache', {
+            querySnippet: text.slice(0, 60),
+            hitCount: cachedEntry.hitCount,
+            tokensSaved: totalTokensSaved
+          });
+        }
+
+        return;
+      }
+    }
+
     // Least invasive supported mechanism: safe UI-level substitution
     // Single active behavior: semantics-preserving prompt normalization
     let substitutionResult = null;
@@ -1639,6 +1744,86 @@
             expression: localCandidate.expression,
             result: localCandidate.result,
             ruleId: localCandidate.ruleId
+          });
+        }
+
+        return;
+      }
+    }
+
+    // Check for on-device extension query cache match (serves repeated queries directly from cache)
+    const isCachingActive = userSettingsManager && typeof userSettingsManager.isOptimizationCategoryEnabled === 'function'
+      ? userSettingsManager.isOptimizationCategoryEnabled('caching')
+      : (typeof userSettingsManager.isOptimizationEnabled !== 'function' || userSettingsManager.isOptimizationEnabled());
+
+    if (isCachingActive && !isBypass && queryCache && localAnswerController && queryCache.has(text)) {
+      const cachedEntry = queryCache.get(text, { turnTracker });
+      if (cachedEntry) {
+        event._sqrHandled = true;
+        if (typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+
+        const promptToks = tokenCounterModule
+          ? tokenCounterModule.countTokens(text) + (tokenCounterModule.MESSAGE_FRAMING_OVERHEAD_TOKENS || 3)
+          : Math.ceil(text.length / 4) + 3;
+        const responseToks = tokenCounterModule
+          ? tokenCounterModule.countTokens(cachedEntry.responseText) + (tokenCounterModule.MESSAGE_FRAMING_OVERHEAD_TOKENS || 3)
+          : Math.ceil(cachedEntry.responseText.length / 4) + 3;
+        const contextToks = (turnTracker && tokenCounterModule && typeof tokenCounterModule.countConversationTokens === 'function')
+          ? tokenCounterModule.countConversationTokens(turnTracker.getRecentTurns())
+          : 0;
+        const totalTokensSaved = cachedEntry.hitTokensSaved || (promptToks + responseToks + contextToks);
+
+        localAnswerController.showAnswer({
+          expression: text,
+          result: cachedEntry.responseText,
+          ruleId: 'RULE_EXTENSION_QUERY_CACHE_HIT',
+          rawQuery: text,
+          isCache: true,
+          tokensSaved: totalTokensSaved,
+          hitCount: cachedEntry.hitCount,
+          editorElement: editor,
+          onAskClaudeAnyway: () => {
+            triggerNativeSubmission(editor, text);
+          }
+        });
+
+        if (metricsTracker) {
+          const diag = buildRouteDiagnostics({
+            routeType: 'LOCAL',
+            cacheOutcome: 'HIT',
+            routing: {
+              reasonCode: 'CACHE_HIT',
+              explanation: 'Identical query detected. Served instantly from extension local cache, saving 100% of LLM tokens.'
+            }
+          });
+
+          metricsTracker.recordActivity({
+            route: 'Extension Query Cache',
+            modelTier: 'local',
+            cacheOutcome: 'HIT',
+            tokensSaved: totalTokensSaved,
+            tokensConsumed: 0,
+            latencyMs: 0.1,
+            status: 'CACHE_HIT',
+            diagnostics: diag
+          });
+        }
+
+        latestTransientQueryEvent = { _localAnswerResolved: true, _cacheHit: true };
+
+        if (logger) {
+          logger.info(EventCategory.QUERY_DETECTION, 'Query served from extension local cache', {
+            querySnippet: text.slice(0, 60),
+            hitCount: cachedEntry.hitCount,
+            tokensSaved: totalTokensSaved
           });
         }
 
@@ -1826,5 +2011,7 @@
     globalThis.__smartQueryRouterResponseTracker = responseTracker;
     globalThis.__smartQueryRouter_submitUserFeedback = submitUserFeedback;
     globalThis.__smartQueryRouterFeedbackUi = feedbackUiController;
+    globalThis.__smartQueryRouterQueryCache = queryCache;
+    globalThis.__smartQueryRouterLocalAnswerController = localAnswerController;
   }
 })();

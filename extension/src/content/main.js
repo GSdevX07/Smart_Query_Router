@@ -135,6 +135,9 @@
 	});
 	ui.initialize();
 
+	const queryNav = new CC.ui.QueryNavigatorUI();
+	queryNav.initialize();
+
 	// Bridge must be ready before we can make requests
 	const bridgeReady = CC.injectBridgeOnce();
 
@@ -181,6 +184,7 @@
 		await bridgeReady;
 		if (!currentConversationId) {
 			ui.setConversationMetrics();
+			queryNav.setQueries([]);
 			return;
 		}
 
@@ -198,6 +202,10 @@
 	function handleGenerationStart() {
 		if (!currentConversationId) return;
 		ui.setPendingCache(true);
+		// Re-check DOM for user message after short delay
+		setTimeout(() => {
+			if (currentConversationId) refreshConversation();
+		}, 600);
 	}
 
 	async function handleConversationPayload({ orgId, conversationId, data }) {
@@ -207,6 +215,59 @@
 
 		const metrics = await CC.tokens.computeConversationMetrics(data);
 		ui.setConversationMetrics({ totalTokens: metrics.totalTokens, cachedUntil: metrics.cachedUntil });
+
+		if (typeof CC.tokens.extractTrunkQueries === 'function') {
+			const queries = CC.tokens.extractTrunkQueries(data);
+			queryNav.setQueries(queries);
+		}
+
+		// Synchronize all query-response pairs from conversation trunk into on-device query cache
+		const queryCache = (globalThis.SmartQueryRouterQueryCache && globalThis.SmartQueryRouterQueryCache.defaultQueryCache) || null;
+		if (queryCache && typeof CC.tokens.buildTrunk === 'function') {
+			try {
+				const trunk = CC.tokens.buildTrunk(data);
+				let lastUserText = '';
+				for (const msg of trunk) {
+					const isHuman = msg?.sender === 'human' || msg?.sender === 'user';
+					const isAssistant = msg?.sender === 'assistant';
+					if (isHuman) {
+						let text = '';
+						if (typeof msg.text === 'string' && msg.text) {
+							text = msg.text;
+						} else if (Array.isArray(msg.content)) {
+							const parts = [];
+							for (const item of msg.content) {
+								if (item && item.type === 'text' && typeof item.text === 'string') {
+									parts.push(item.text);
+								}
+							}
+							text = parts.join('\n');
+						}
+						lastUserText = text.trim();
+					} else if (isAssistant && lastUserText) {
+						let respText = '';
+						if (typeof msg.text === 'string' && msg.text) {
+							respText = msg.text;
+						} else if (Array.isArray(msg.content)) {
+							const parts = [];
+							for (const item of msg.content) {
+								if (item && item.type === 'text' && typeof item.text === 'string') {
+									parts.push(item.text);
+								}
+							}
+							respText = parts.join('\n');
+						}
+						respText = respText.trim();
+						if (respText) {
+							queryCache.set(lastUserText, respText, { conversationId });
+						}
+						lastUserText = '';
+					}
+				}
+			} catch (_) {
+				// Fail-open
+			}
+		}
 	}
 
 	function handleMessageLimit(messageLimit) {
@@ -232,6 +293,7 @@
 
 		if (!currentConversationId) {
 			ui.setConversationMetrics();
+			queryNav.setQueries([]);
 			return;
 		}
 

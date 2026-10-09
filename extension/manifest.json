@@ -62,6 +62,7 @@
         "src/shared/routing_policy_config.js",
         "src/shared/routing_policy.js",
         "src/shared/token_counter.js",
+        "src/shared/query_cache.js",
         "src/shared/optimizer_pipeline.js",
         "src/content/ui_substitution.js",
         "src/content/response_state_tracker.js",

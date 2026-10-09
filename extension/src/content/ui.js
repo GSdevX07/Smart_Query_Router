@@ -573,7 +573,462 @@
 		}
 	}
 
+	function formatQuerySnippet(text, maxLength = 32) {
+		if (!text || typeof text !== 'string') return '';
+		const clean = text.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+		if (clean.length <= maxLength) return clean;
+		return clean.slice(0, maxLength).trimEnd() + '...';
+	}
+
+	class QueryNavigatorUI {
+		constructor({ onQuerySelect } = {}) {
+			this.onQuerySelect = onQuerySelect || null;
+			this.queries = [];
+			this.activeIndex = -1;
+			this.isPopupOpen = false;
+
+			this.container = null;
+			this.timeline = null;
+			this.popup = null;
+			this.dotElements = [];
+			this.dotWrapperElements = [];
+			this.itemElements = [];
+
+			this._scrollRaf = null;
+			this._closeTimer = null;
+			this._onDocumentClick = null;
+			this._onKeyDown = null;
+			this._onScroll = null;
+			this._highlightTimeout = null;
+		}
+
+		initialize() {
+			if (this.container && document.body?.contains?.(this.container)) return;
+
+			this.container = document.createElement('div');
+			this.container.className = 'cc-query-nav cc-hidden';
+
+			this.timeline = document.createElement('div');
+			this.timeline.className = 'cc-query-timeline';
+			this.timeline.setAttribute('role', 'navigation');
+			this.timeline.setAttribute('aria-label', 'Conversation Query Timeline');
+
+			this.popup = document.createElement('div');
+			this.popup.className = 'cc-query-popup';
+			this.popup.setAttribute('role', 'menu');
+			this.popup.setAttribute('aria-label', 'Conversation Queries');
+
+			this.container.appendChild(this.timeline);
+			this.container.appendChild(this.popup);
+
+			if (document.body) {
+				document.body.appendChild(this.container);
+			}
+
+			// Hover on container keeps popup open and cancels any pending close timer
+			this.container.addEventListener?.('mouseenter', () => {
+				if (this._closeTimer) {
+					clearTimeout(this._closeTimer);
+					this._closeTimer = null;
+				}
+				if (this.queries.length > 0) {
+					this.openPopup();
+				}
+			});
+
+			// Mouse leaving container closes popup after a 220ms smooth grace period
+			this.container.addEventListener?.('mouseleave', () => {
+				if (this._closeTimer) clearTimeout(this._closeTimer);
+				this._closeTimer = setTimeout(() => {
+					this.closePopup();
+					this._closeTimer = null;
+				}, 220);
+			});
+
+			// Prevent inside clicks from triggering document dismiss
+			this.container.addEventListener?.('pointerdown', (e) => e?.stopPropagation?.());
+			this.container.addEventListener?.('mousedown', (e) => e?.stopPropagation?.());
+
+			// Click/tap outside dismisses popup
+			this._onDocumentClick = (e) => {
+				if (!this.isPopupOpen) return;
+				if (this.container && !this.container.contains?.(e.target)) {
+					this.closePopup();
+				}
+			};
+			document.addEventListener?.('pointerdown', this._onDocumentClick);
+			document.addEventListener?.('click', this._onDocumentClick);
+
+			// Escape key dismisses popup
+			this._onKeyDown = (e) => {
+				if (e.key === 'Escape' && this.isPopupOpen) {
+					this.closePopup();
+				}
+			};
+			document.addEventListener?.('keydown', this._onKeyDown, true);
+
+			// ScrollSpy: track viewport scroll position to highlight active query
+			this._onScroll = () => {
+				if (this._scrollRaf) return;
+				if (typeof requestAnimationFrame === 'function') {
+					this._scrollRaf = requestAnimationFrame(() => {
+						this._scrollRaf = null;
+						this.updateActiveFromScroll();
+					});
+				} else {
+					this.updateActiveFromScroll();
+				}
+			};
+			window.addEventListener?.('scroll', this._onScroll, { passive: true, capture: true });
+		}
+
+		setQueries(rawQueries) {
+			const list = Array.isArray(rawQueries) ? rawQueries : [];
+			this.queries = list.map((q, idx) => {
+				if (typeof q === 'string') {
+					return { id: `q_${idx}`, uuid: null, text: q, index: idx };
+				}
+				return {
+					id: q.id || q.uuid || `q_${idx}`,
+					uuid: q.uuid || null,
+					text: q.text || '',
+					index: idx,
+					createdAt: q.createdAt || null
+				};
+			}).filter((q) => Boolean(q.text.trim()));
+
+			if (!this.container) {
+				this.initialize();
+			}
+
+			if (this.queries.length === 0) {
+				this.container?.classList?.add('cc-hidden');
+				this.closePopup();
+				this.activeIndex = -1;
+				return;
+			}
+
+			this.container?.classList?.remove('cc-hidden');
+
+			// Default active query: keep current if valid, else latest query
+			if (this.activeIndex < 0 || this.activeIndex >= this.queries.length) {
+				this.activeIndex = this.queries.length - 1;
+			}
+
+			this.render();
+		}
+
+		render() {
+			if (!this.timeline || !this.popup) return;
+
+			if (typeof this.timeline.replaceChildren === 'function') {
+				this.timeline.replaceChildren();
+				this.popup.replaceChildren();
+			} else {
+				this.timeline.innerHTML = '';
+				this.popup.innerHTML = '';
+			}
+			this.dotElements = [];
+			this.dotWrapperElements = [];
+			this.itemElements = [];
+
+			this.queries.forEach((query, index) => {
+				// 1. Timeline dot wrapper with generous hit target (Image 1)
+				// NO title attribute to prevent native browser tooltip box from appearing
+				const dotWrapper = document.createElement('div');
+				dotWrapper.className = 'cc-query-dot-wrapper';
+				dotWrapper.setAttribute('data-index', String(index));
+
+				const dot = document.createElement('div');
+				dot.className = 'cc-query-dot' + (index === this.activeIndex ? ' cc-active' : '');
+				dot.setAttribute('data-index', String(index));
+
+				dotWrapper.appendChild(dot);
+
+				// Hover directly on dot opens popup card and highlights this item
+				dotWrapper.addEventListener?.('mouseenter', () => {
+					if (this._closeTimer) {
+						clearTimeout(this._closeTimer);
+						this._closeTimer = null;
+					}
+					this.openPopup();
+					this.setActiveIndex(index);
+				});
+
+				const handleDotTap = (e) => {
+					e?.stopPropagation?.();
+					this.openPopup();
+					this.scrollToQuery(index);
+				};
+
+				dotWrapper.addEventListener?.('pointerdown', (e) => e?.stopPropagation?.());
+				dotWrapper.addEventListener?.('click', handleDotTap);
+
+				this.timeline.appendChild(dotWrapper);
+				this.dotElements.push(dot);
+				this.dotWrapperElements.push(dotWrapper);
+
+				// 2. Popup list row item (Image 2)
+				// NO title attribute to prevent native browser tooltip box from appearing
+				const item = document.createElement('div');
+				item.className = 'cc-query-item' + (index === this.activeIndex ? ' cc-active' : '');
+				item.setAttribute('role', 'menuitem');
+				item.setAttribute('data-index', String(index));
+
+				const textSpan = document.createElement('span');
+				textSpan.className = 'cc-query-text';
+				textSpan.textContent = formatQuerySnippet(query.text, 32);
+
+				const itemDot = document.createElement('span');
+				itemDot.className = 'cc-query-item-dot' + (index === this.activeIndex ? ' cc-active' : '');
+
+				item.appendChild(textSpan);
+				item.appendChild(itemDot);
+
+				item.addEventListener?.('mouseenter', () => {
+					this.setActiveIndex(index);
+				});
+
+				const handleItemTap = (e) => {
+					e?.stopPropagation?.();
+					this.scrollToQuery(index);
+					if (this.onQuerySelect) {
+						this.onQuerySelect(query, index);
+					}
+				};
+
+				item.addEventListener?.('pointerdown', (e) => e?.stopPropagation?.());
+				item.addEventListener?.('click', handleItemTap);
+
+				this.popup.appendChild(item);
+				this.itemElements.push(item);
+			});
+		}
+
+		openPopup() {
+			if (this.isPopupOpen) return;
+			this.isPopupOpen = true;
+			this.popup?.classList?.add('cc-open');
+		}
+
+		closePopup() {
+			if (!this.isPopupOpen) return;
+			this.isPopupOpen = false;
+			this.popup?.classList?.remove('cc-open');
+		}
+
+		togglePopup() {
+			if (this.isPopupOpen) {
+				this.closePopup();
+			} else {
+				this.openPopup();
+			}
+		}
+
+		setActiveIndex(index) {
+			if (index < 0 || index >= this.queries.length) return;
+			this.activeIndex = index;
+
+			this.dotElements.forEach((dot, idx) => {
+				dot.classList?.toggle('cc-active', idx === index);
+			});
+
+			this.itemElements.forEach((item, idx) => {
+				item.classList?.toggle('cc-active', idx === index);
+				const itemDot = item.querySelector ? item.querySelector('.cc-query-item-dot') : null;
+				if (itemDot) {
+					itemDot.classList?.toggle('cc-active', idx === index);
+				}
+			});
+		}
+
+		findUserMessageElements() {
+			if (typeof document.querySelectorAll !== 'function') return [];
+
+			const primarySelectors = [
+				'[data-testid="user-message"]',
+				'[data-message-author="human"]',
+				'[data-message-author-role="user"]',
+				'.font-user-message',
+				'div[data-testid*="user-message"]'
+			];
+
+			let candidates = [];
+			for (const sel of primarySelectors) {
+				const matches = Array.from(document.querySelectorAll(sel));
+				if (matches.length > 0) {
+					candidates = matches;
+					break;
+				}
+			}
+
+			if (candidates.length === 0) {
+				const chatContainers = document.querySelectorAll(
+					'[data-testid="chat-conversation-container"], [data-testid="chat-messages-list"], main'
+				);
+				for (const container of chatContainers) {
+					if (typeof container.querySelectorAll === 'function') {
+						const matches = Array.from(container.querySelectorAll('.font-user-message, [class*="user-message"]'));
+						if (matches.length > 0) {
+							candidates = matches;
+							break;
+						}
+					}
+				}
+			}
+
+			// Deduplicate nested elements: keep outermost message container
+			const distinct = candidates.filter((el, idx, arr) => {
+				return !arr.some((other, oIdx) => oIdx !== idx && other.contains && other.contains(el));
+			});
+
+			return distinct;
+		}
+
+		findChatScrollContainer() {
+			if (typeof document.querySelector !== 'function') return null;
+			return document.querySelector('[data-testid="chat-conversation-container"]') ||
+				document.querySelector('.overflow-y-auto') ||
+				document.querySelector('main') ||
+				document.documentElement;
+		}
+
+		findTargetMessageElement(queryIndex) {
+			const query = this.queries[queryIndex];
+			if (!query) return null;
+
+			const userNodes = this.findUserMessageElements();
+
+			// 1. Direct 1-to-1 index matching when node count matches query count
+			if (userNodes.length === this.queries.length && userNodes[queryIndex]) {
+				return userNodes[queryIndex];
+			}
+
+			// 2. Exact or substring matching inside userNodes
+			const rawText = (query.text || '').trim().toLowerCase();
+			if (rawText.length >= 6 && userNodes.length > 0) {
+				const sample = rawText.slice(0, 30);
+				for (let i = 0; i < userNodes.length; i++) {
+					const nodeText = (userNodes[i].textContent || userNodes[i].innerText || '').trim().toLowerCase();
+					if (nodeText.includes(sample)) {
+						return userNodes[i];
+					}
+				}
+			}
+
+			// 3. Fallback to direct index in userNodes
+			if (userNodes.length > queryIndex && userNodes[queryIndex]) {
+				return userNodes[queryIndex];
+			}
+
+			return null;
+		}
+
+		scrollToQuery(index) {
+			if (index < 0 || index >= this.queries.length) return;
+			this.setActiveIndex(index);
+
+			const targetEl = this.findTargetMessageElement(index);
+
+			if (targetEl) {
+				if (typeof targetEl.scrollIntoView === 'function') {
+					targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+				}
+				this._flashTargetElement(targetEl);
+			} else {
+				// Estimated scroll if virtualized
+				const scrollContainer = this.findChatScrollContainer();
+
+				if (scrollContainer && this.queries.length > 1) {
+					const ratio = index / (this.queries.length - 1);
+					const scrollTarget = ratio * (scrollContainer.scrollHeight - scrollContainer.clientHeight);
+					if (typeof scrollContainer.scrollTo === 'function') {
+						scrollContainer.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+					} else if (scrollContainer.scrollTop !== undefined) {
+						scrollContainer.scrollTop = scrollTarget;
+					}
+
+					setTimeout(() => {
+						const retryEl = this.findTargetMessageElement(index);
+						if (retryEl) {
+							if (typeof retryEl.scrollIntoView === 'function') {
+								retryEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+							}
+							this._flashTargetElement(retryEl);
+						}
+					}, 180);
+				}
+			}
+		}
+
+		_flashTargetElement(element) {
+			if (!element) return;
+			if (this._highlightTimeout) {
+				clearTimeout(this._highlightTimeout);
+			}
+			element.classList?.remove?.('cc-query-target-highlight');
+			if (element.offsetWidth !== undefined) {
+				void element.offsetWidth;
+			}
+			element.classList?.add?.('cc-query-target-highlight');
+			this._highlightTimeout = setTimeout(() => {
+				element.classList?.remove?.('cc-query-target-highlight');
+			}, 1900);
+		}
+
+		updateActiveFromScroll() {
+			if (this.queries.length <= 1) return;
+			const userNodes = this.findUserMessageElements();
+			if (userNodes.length === 0) return;
+
+			const targetTop = (typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 800) * 0.35;
+			let closestIndex = -1;
+			let minDistance = Infinity;
+
+			userNodes.forEach((node, idx) => {
+				if (idx >= this.queries.length) return;
+				if (typeof node.getBoundingClientRect === 'function') {
+					const rect = node.getBoundingClientRect();
+					const dist = Math.abs(rect.top - targetTop);
+					if (dist < minDistance) {
+						minDistance = dist;
+						closestIndex = idx;
+					}
+				}
+			});
+
+			if (closestIndex >= 0 && closestIndex !== this.activeIndex) {
+				this.setActiveIndex(closestIndex);
+			}
+		}
+
+		destroy() {
+			if (this._closeTimer) {
+				clearTimeout(this._closeTimer);
+				this._closeTimer = null;
+			}
+			if (this._onDocumentClick && typeof document.removeEventListener === 'function') {
+				document.removeEventListener('pointerdown', this._onDocumentClick);
+				document.removeEventListener('click', this._onDocumentClick);
+			}
+			if (this._onKeyDown && typeof document.removeEventListener === 'function') {
+				document.removeEventListener('keydown', this._onKeyDown, true);
+			}
+			if (this._onScroll && typeof window.removeEventListener === 'function') {
+				window.removeEventListener('scroll', this._onScroll, { capture: true });
+			}
+			if (this._scrollRaf && typeof cancelAnimationFrame === 'function') {
+				cancelAnimationFrame(this._scrollRaf);
+			}
+			if (this.container && this.container.parentElement) {
+				this.container.parentElement.removeChild(this.container);
+			}
+		}
+	}
+
 	CC.ui = {
-		CounterUI
+		CounterUI,
+		QueryNavigatorUI,
+		formatQuerySnippet
 	};
 })();
